@@ -6,10 +6,13 @@ import json
 class QuotaChangeModelRunner(object):
     def __init__(self):
         self.trips = {}
-        self.acl = {}
+        self.acls = {}
+        self.low_buffer = .15
+        self.valid_stocks = [str(i) for i in range(1, 17+1)]
 
         self.ingest_inputs()
         self.process_trips()
+        self.calculate_p_scores()
 
     def ingest_inputs(self):
         self.ingest_catch()
@@ -42,14 +45,16 @@ class QuotaChangeModelRunner(object):
 
                 # Get or initialize trip.
                 trip = self.trips.setdefault(trip_id, {
+                    'trip_id': trip_id,
                     'mri': row['mri'],
-                    'stock_catches': {},
+                    'stock_catch': {},
                     'spec_totals': {},
+                    'stock_p_scores': {},
                 })
 
                 # Add catch to stock catch lists.
                 stock_id = row['stock_id1']
-                trip['stock_catches'].setdefault(stock_id, []).append(catch)
+                trip['stock_catch'][stock_id] = catch
 
                 # Add to spec catch totals.
                 spec = row['spec']
@@ -84,7 +89,9 @@ class QuotaChangeModelRunner(object):
             for row in reader:
                 stock_id = row.get('stock_id1')
                 if stock_id is None: continue
-                stock = self.acl.setdefault(stock_id, {})
+                if stock_id not in self.valid_stocks: 
+                    continue
+                stock = self.acls.setdefault(stock_id, {})
                 stock.update(row)
 
     def process_trips(self):
@@ -102,20 +109,73 @@ class QuotaChangeModelRunner(object):
             trip['netrev'] = trip['trip_revenue'] - trip['variable_cost']
 
             # Calculate ACE efficiency per stock.
-            # Note: each catch list in stock_catches should normally
-            # just have one item, but in case there are multiple
-            # items, the mean of the valus is used, as per chad's
-            # SAS code.
-            trip['stock_efficiencies'] = {}
-            for stock_id, catches in trip['stock_catches'].items():
-                mean_catch = float(sum(catches))/len(catches)
-                if mean_catch > 0:
-                    ace_effic = trip['netrev']/mean_catch
-                    trip['stock_efficiencies'][stock_id] = ace_effic
+            trip['stock_effics'] = {}
+            for stock_id, catch in trip['stock_catch'].items():
+                if catch > 0:
+                    ace_effic = trip['netrev']/catch
+                else:
+                    ace_effic = 0
+                trip['stock_effics'][stock_id] = ace_effic
 
     def calculate_p_scores(self):
-        """ Calculate probability scores for each trip."""
-        pass
+        """ Calculate probability scores for each trip.
+        A p_score represent a trip's probability of occuring.
+        A trip's stock p_score is the ratio of the trip's efficiency for 
+        that stock to the minimum efficiency for that stock (relative
+        efficiency), modified by the distance between the max and min 
+        efficiency for that stock.
+        A trip's final p_score is the min of the trip's stock p_scores.
+        """
+
+        for stock_id, acl in self.acls.items():
+            limit = acl['limit_1']
+
+            # Get min, max ace efficiencies for the stock, 
+            # from the set of most efficient trips whose combined
+            # catch does not exceed the limit.
+            def get_ace_effic(trip):
+                return trip['stock_effics'].get(stock_id, 0)
+            sorted_trips = sorted(self.trips.values(), key=get_ace_effic,
+                                  reverse=True)
+            if not sorted_trips:
+                continue
+            max_ace_effic = sorted_trips[0]['stock_effics'].get(stock_id)
+            min_ace_effic = None
+            cumulative_catch = 0
+            for trip in sorted_trips:
+                ace_effic = trip['stock_effics'].get(stock_id)
+                if ace_effic is None: 
+                    continue
+                if ace_effic <= 0: 
+                    break
+                cumulative_catch += trip['stock_catch'].get(stock_id)
+                if cumulative_catch > limit:
+                    break
+                min_ace_effic = ace_effic
+
+            if max_ace_effic <= 0 or min_ace_effic <= 0:
+                continue
+
+            # Buffer the minimum efficiency.
+            buffered_min_ace_effic = min_ace_effic * (1.0 - self.low_buffer)
+            # Calculate the stock p_score for each trip.
+            for trip in self.trips.values():
+                stock_p_scores = trip['stock_p_scores']
+                ace_effic = trip['stock_effics'].get(stock_id)
+                if ace_effic is None: 
+                    continue
+                if ace_effic <= 0:
+                    stock_p_score = 0
+                else:
+                    relative_effic = 1.0 - buffered_min_ace_effic/ace_effic
+                    range_modifier = 1.0 - buffered_min_ace_effic/max_ace_effic
+                    stock_p_score = max(0, relative_effic/range_modifier)
+                stock_p_scores[stock_id] = stock_p_score
+
+        # Set each trip's overall p_score as the min of its stock p_scores.
+        for trip in self.trips.values():
+            trip['p_score'] = min(trip.get('stock_p_scores').values() or [0])
+            print trip['trip_id'], trip['p_score']
 
     def run_simulations(self):
         pass
