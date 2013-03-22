@@ -3,3 +3,4 @@ py2.7
 test_data
 **/*.pyc
 timelog.txt
+tmp

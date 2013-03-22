@@ -1,6 +1,7 @@
 import csv
 import os
 import json
+import sys
 
 
 class QuotaChangeModelRunner(object):
@@ -96,12 +97,23 @@ class QuotaChangeModelRunner(object):
 
     def process_trips(self):
         for trip_id, trip in self.trips.items():
+            # Filter out trips that don't have any of the stocks we're 
+            # interested in.
+            has_valid_stocks = False
+            for stock_id in trip['stock_catch']:
+                if stock_id in self.valid_stocks:
+                    has_valid_stocks = True
+                    break
+            if not has_valid_stocks:
+                del self.trips[trip_id]
+                continue
+
             # Filter out trips that have low gfish catch, 
             # or low groundfish ratios.
             spec_totals = trip['spec_totals']
             gfish = spec_totals.get('gfish', 0)
             non_gfish = spec_totals.get('non_gfish', .1)
-            if gfish < 15 or 1.0 * gfish/non_gfish <= .0075:
+            if gfish <= 15 or 1.0 * gfish/non_gfish <= .0075:
                 del self.trips[trip_id]
                 continue
 
@@ -128,7 +140,7 @@ class QuotaChangeModelRunner(object):
         """
 
         for stock_id, acl in self.acls.items():
-            limit = acl['limit_1']
+            limit = float(acl['limit_1'])
 
             # Get min, max ace efficiencies for the stock, 
             # from the set of most efficient trips whose combined
@@ -149,16 +161,21 @@ class QuotaChangeModelRunner(object):
                 if ace_effic <= 0: 
                     break
                 cumulative_catch += trip['stock_catch'].get(stock_id)
-                if cumulative_catch > limit:
+                if cumulative_catch >= limit:
                     break
                 min_ace_effic = ace_effic
-
+            
+            # If invalid min or max, set 0 for p_score for trips that
+            # had catches for the stock.
             if max_ace_effic <= 0 or min_ace_effic <= 0:
+                for trip in self.trips.values():
+                    if trip['stock_catch'].get(stock_id) is not None:
+                        trip['stock_p_scores'][stock_id] = 0
                 continue
 
             # Buffer the minimum efficiency.
             buffered_min_ace_effic = min_ace_effic * (1.0 - self.low_buffer)
-            # Calculate the stock p_score for each trip.
+            # Set the stock p_score for each trip.
             for trip in self.trips.values():
                 stock_p_scores = trip['stock_p_scores']
                 ace_effic = trip['stock_effics'].get(stock_id)
@@ -175,7 +192,6 @@ class QuotaChangeModelRunner(object):
         # Set each trip's overall p_score as the min of its stock p_scores.
         for trip in self.trips.values():
             trip['p_score'] = min(trip.get('stock_p_scores').values() or [0])
-            print trip['trip_id'], trip['p_score']
 
     def run_simulations(self):
         pass
