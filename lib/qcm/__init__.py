@@ -2,6 +2,8 @@ import csv
 import os
 import json
 import sys
+import random
+import bisect
 
 
 class QuotaChangeModelRunner(object):
@@ -196,9 +198,32 @@ class QuotaChangeModelRunner(object):
     def run_simulations(self):
         pass
 
+    def get_trips_sample(self, num_trips=100):
+        sorted_trips = sorted(self.trips.values(), key=lambda t: t['p_score'])
+        totals = []
+        total = 0
+        for t in sorted_trips:
+            total += t['p_score']
+            totals.append(total)
+
+        for n in xrange(num_trips):
+            rnd = random.random() * total
+            left_idx = bisect.bisect_left(totals, rnd)
+            right_idx = bisect.bisect_right(totals, rnd)
+            sample_idx = random.randint(left_idx, right_idx)
+            yield sorted_trips[sample_idx]
 
 def main():
     qcmr = QuotaChangeModelRunner()
+    import time
+    for i in range(10):
+        s = time.time()
+        num_trips = int(1e4)
+        sample = qcmr.get_trips_sample(num_trips=num_trips)
+        gfish = (sum([t.get('spec_totals').get('gfish', 0) 
+                    for t in sample]) / float(num_trips))
+        e = time.time()
+        print "time: {}, avg gfish: {}".format(e - s, gfish)
 
 if __name__ == '__main__':
     main()
